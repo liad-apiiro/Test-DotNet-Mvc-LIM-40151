@@ -6,12 +6,12 @@ Synthetic minimal reproducer for [LIM-40151](https://apiiro.atlassian.net/browse
 
 | File | Purpose |
 |---|---|
-| `Reproducer.sln` | One-project solution; the extractor opens this to discover `Reproducer.csproj`. |
-| `src/Reproducer.csproj` | Minimal SDK-style project targeting `net8.0`. No NuGet references — types come from the inline stubs below. |
-| `src/_MvcStubs.cs` | Stubs for `System.Web.Mvc.Controller`, `System.Web.HttpApplication`, and the routing types. Lets the project compile under any SDK without needing the netfx `Microsoft.AspNet.Mvc` package. `Controller` is `abstract` so the extractor doesn't mis-classify the stub itself. |
-| `src/MvcApplication.cs` | Class extending `System.Web.HttpApplication`. Detected as the MVC application class because its base type literal is `HttpApplication` (or `System.Web.HttpApplication`). Calls `routes.MapRoute(...)` so a working extractor will register routes against the controller. |
+| `Reproducer.sln` | Two-project solution. The extractor opens this and discovers both projects. |
+| `src/Reproducer.csproj` | Main project targeting `net8.0`. Has a `ProjectReference` to `Reproducer.Stubs` — the stubs must live in a **separate assembly** for the extractor's route-registration detection to fire. |
+| `src/MvcApplication.cs` | Class extending `System.Web.HttpApplication`. Detected as the MVC application class because its base type literal is `HttpApplication` (or `System.Web.HttpApplication`). Calls `routes.MapRoute(...)` from the stubs assembly so the extractor's external-call detection at [`MethodEntity.cs:418`](https://github.com/apiiro/lim/blob/dev/src/Lim.FeaturesExtractor.Dotnet/Parser/Entities/MethodEntity.cs#L418) fires `RegisterMvcRoute`. |
 | `src/HomeController.cs` | Class named `HomeController` extending `Controller`, with `using System.Web.Mvc;`. **This is the entity that the buggy code returns `null` for in `GetSolutionPath`**, producing the crash. |
 | `src/InventoryService.cs` | **Control item.** Plain C# class, no MVC base, no `Controller` suffix. Should be extracted normally by any version of the extractor — confirms the repro isn't crashing the world, only the MVC code path. |
+| `stubs/Reproducer.Stubs.csproj` + `stubs/MvcStubs.cs` | Stubs for `System.Web.Mvc.Controller`, `System.Web.HttpApplication`, and the routing types in a **separate assembly**. Lets the main project compile without the netfx `Microsoft.AspNet.Mvc` NuGet. Critical that this is its own project: when `routes.MapRoute(...)` is called from `MvcApplication`, the extractor only registers it as a route if the called method lives in an *external* assembly ([MethodEntity.cs:418](https://github.com/apiiro/lim/blob/dev/src/Lim.FeaturesExtractor.Dotnet/Parser/Entities/MethodEntity.cs#L418)) — same-assembly calls are treated as internal and skipped. `Controller` is `abstract` so the extractor doesn't mis-classify the stub itself. |
 
 ## Why this code reproduces the bug
 

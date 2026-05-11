@@ -3,11 +3,6 @@
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>disable</Nullable>
-    <NoWarn>CS0246;CS0234;CS1591</NoWarn>
   </PropertyGroup>
-
-  <ItemGroup>
-    <ProjectReference Include="..\stubs\Reproducer.Stubs.csproj" />
-  </ItemGroup>
 
 </Project>
