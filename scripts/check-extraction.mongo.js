@@ -4,8 +4,8 @@
 // Designed for the LIM-40151 reproducer but works for any repo by name.
 //
 // Usage (mongosh, connected to the customer's primary database):
-//   load("scripts/check-extraction.mongo.js")
-// or paste this whole file into the shell.
+//   mongosh "<conn-str>" --file scripts/check-extraction.mongo.js
+// or paste the file into an open shell.
 
 (function () {
     const REPO_NAME = "Test-DotNet-Mvc-LIM-40151";
@@ -52,22 +52,22 @@
         print(`   HasApis           : ${profile.HasApis}`);
         print(`   CalculatedHasApis : ${profile.CalculatedHasApis}`);
         print(`   HasSensitiveApis  : ${profile.HasSensitiveApis}`);
-        print(`   FirstCycleDone    : ${profile.FirstCycleCompleted}`);
     }
 
     // ---- 3. Commits indexed --------------------------------------------
     section("Commits indexed for this repo");
     const commitCount = db.commits.countDocuments({ RepositoryKey: repoKey });
     const latestCommit = db.commits
-        .find({ RepositoryKey: repoKey }, { Sha: 1, AuthorName: 1, CommitTime: 1 })
-        .sort({ CommitTime: -1 })
+        .find({ RepositoryKey: repoKey }, { Sha: 1, AuthorIdentityKey: 1, Timestamp: 1, RepositoryKey: 1 })
+        .sort({ Timestamp: -1 })
         .limit(1)
         .toArray()[0];
     if (commitCount === 0) {
         print(`${FAIL} No commits indexed.`);
     } else {
         print(`${PASS} ${commitCount} commit(s) indexed`);
-        print(`   Latest: ${latestCommit?.Sha} by ${latestCommit?.AuthorName} at ${latestCommit?.CommitTime?.toISOString?.() ?? latestCommit?.CommitTime}`);
+        const ts = latestCommit?.Timestamp?.toISOString?.() ?? latestCommit?.Timestamp;
+        print(`   Latest: ${latestCommit?.Sha} by ${latestCommit?.AuthorIdentityKey ?? "(no AuthorIdentityKey)"} at ${ts ?? "(no Timestamp)"}`);
     }
 
     // ---- 4. Inventory breakdown ----------------------------------------
@@ -84,29 +84,43 @@
         inventoryBuckets.forEach(b => print(`   ${String(b._id).padEnd(20)} ${b.count}`));
     }
 
-    // ---- 5. Probe the reproducer's known entities ----------------------
-    section("Reproducer entity probes");
-    const probes = [
-        { label: "HomeController class", filter: { "DiffableEntity.Name": "HomeController" } },
-        { label: "MVC application class", filter: { "DiffableEntity.Name": "MvcApplication" } },
-        { label: "InventoryService class (control)", filter: { "DiffableEntity.Name": "InventoryService" } },
-        { label: "Action method 'Index'", filter: { "DiffableEntity.MethodName": "Index" } },
-        { label: "Action method 'Details'", filter: { "DiffableEntity.MethodName": "Details" } },
-        { label: "Any MVC route", filter: { "DiffableEntity.Route": { $regex: "Home|items", $options: "i" } } }
+    // ---- 5. List API entries and probe for the reproducer's routes -----
+    section("API entries");
+    const apiEntries = db.inventoryElements.find(
+        { ProfileKey: repoKey, ProfileType: "RepositoryProfile", EntityType: "Api" },
+        {
+            "DiffableEntity.CodeReference.HttpMethod": 1,
+            "DiffableEntity.CodeReference.HttpRoute": 1,
+            "DiffableEntity.CodeReference.MethodName": 1,
+            "DiffableEntity.CodeReference.ClassName": 1,
+            "DiffableEntity.CodeReference.RelativeFilePath": 1
+        }
+    ).toArray();
+    if (apiEntries.length === 0) {
+        print(`${FAIL} No API entries in inventory.`);
+    } else {
+        apiEntries.forEach(e => {
+            const ref = e.DiffableEntity?.CodeReference ?? {};
+            print(`   ${(ref.ClassName ?? "?")}.${(ref.MethodName ?? "?")}  →  ${(ref.HttpMethod ? ref.HttpMethod + " " : "")}${ref.HttpRoute ?? "(no route)"}  [${ref.RelativeFilePath ?? ""}]`);
+        });
+    }
+
+    // Specific expected routes (LIM-40151 reproducer)
+    section("Expected reproducer routes");
+    const expectedRoutes = [
+        { route: "Home/Index/{id}",    label: "HomeController.Index via Default route" },
+        { route: "Home/Details/{id}",  label: "HomeController.Details via Default route" },
+        { route: "items/{id}",         label: "HomeController.Details via DetailsRoute" }
     ];
-    probes.forEach(p => {
-        const hits = db.inventoryElements.find(
-            { ProfileKey: repoKey, ProfileType: "RepositoryProfile", ...p.filter },
-            { EntityType: 1, "DiffableEntity.Name": 1, "DiffableEntity.MethodName": 1, "DiffableEntity.Route": 1, "DiffableEntity.FilePath": 1 }
-        ).limit(3).toArray();
-        if (hits.length === 0) {
-            print(`${FAIL} ${p.label.padEnd(34)} not found`);
+    expectedRoutes.forEach(r => {
+        const hit = db.inventoryElements.findOne(
+            { ProfileKey: repoKey, ProfileType: "RepositoryProfile", EntityType: "Api", "DiffableEntity.CodeReference.HttpRoute": r.route },
+            { "DiffableEntity.CodeReference.MethodName": 1 }
+        );
+        if (hit) {
+            print(`${PASS} ${r.label.padEnd(45)} '${r.route}' present`);
         } else {
-            hits.forEach(h => {
-                const tail = h.DiffableEntity?.Route ?? h.DiffableEntity?.MethodName ?? h.DiffableEntity?.Name ?? "";
-                const file = h.DiffableEntity?.FilePath ? ` [${h.DiffableEntity.FilePath}]` : "";
-                print(`${PASS} ${p.label.padEnd(34)} ${h.EntityType} → ${tail}${file}`);
-            });
+            print(`${FAIL} ${r.label.padEnd(45)} '${r.route}' missing`);
         }
     });
 
@@ -116,24 +130,23 @@
     const hasCommits = commitCount > 0;
     const hasInventory = inventoryBuckets.length > 0;
     const apiCount = (inventoryBuckets.find(b => b._id === "Api") || {}).count || 0;
-    const hasApisInInventory = apiCount > 0;
-    const hasControlItem = db.inventoryElements.countDocuments({
-        ProfileKey: repoKey,
-        ProfileType: "RepositoryProfile",
-        "DiffableEntity.Name": "InventoryService"
-    }) > 0;
+    const hasApis = apiCount > 0;
+    const expectedRoutesPresent = expectedRoutes.every(r => apiEntries.some(e => e.DiffableEntity?.CodeReference?.HttpRoute === r.route));
 
     print(`${hasProfile ? PASS : FAIL} Profile exists`);
     print(`${hasCommits ? PASS : FAIL} Commits indexed`);
     print(`${hasInventory ? PASS : FAIL} Inventory populated`);
-    print(`${hasControlItem ? PASS : WARN} Control item (InventoryService) in inventory`);
-    print(`${hasApisInInventory ? PASS : FAIL} APIs in inventory (${apiCount})  ← this is the LIM-40151 signal`);
+    print(`${profile?.HasApis ? PASS : FAIL} repositoryProfiles.HasApis = ${profile?.HasApis}`);
+    print(`${hasApis ? PASS : FAIL} APIs in inventory (${apiCount})`);
+    print(`${expectedRoutesPresent ? PASS : WARN} All ${expectedRoutes.length} expected reproducer routes present`);
 
     print("");
-    if (hasApisInInventory && hasControlItem) {
-        print(`${PASS} Extraction succeeded end-to-end. MVC enrichment path is healthy.`);
-    } else if (hasControlItem && !hasApisInInventory) {
-        print(`${FAIL} LIM-40151 signature: non-MVC code indexed but no APIs — MVC enrichment is broken.`);
+    if (hasApis && expectedRoutesPresent) {
+        print(`${PASS} Extraction succeeded end-to-end. All expected MVC routes were enriched and indexed.`);
+    } else if (hasApis && !expectedRoutesPresent) {
+        print(`${WARN} APIs are indexed but not all expected reproducer routes are present. Could mean the reproducer code drifted, or the FeaturesCombiner indexed a partial set. Inspect the 'API entries' section above.`);
+    } else if (hasInventory && !hasApis) {
+        print(`${FAIL} LIM-40151 signature: non-API entities indexed but no APIs — MVC enrichment is broken.`);
     } else if (!hasInventory && hasCommits) {
         print(`${FAIL} Extraction reached the commit-indexing stage but produced no inventory.`);
         print(`   Check 'extract-commit-dotnet-dead-letter' queue and GCP logs for ArgumentNullException at BuildControllerIndexBySolution.`);
