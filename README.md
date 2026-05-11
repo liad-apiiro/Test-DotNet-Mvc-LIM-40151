@@ -50,6 +50,16 @@ Useful for distinguishing "extractor is broken on this repo entirely" from "extr
 3. **Buggy build**: GCP log for `lim-features-extractor-dotnet` shows the stack trace pointing at `BuildControllerIndexBySolution`. Repository profile in the UI is empty or stale; commits accumulate in the DLQ retry loop.
 4. **Fixed build**: extraction completes in seconds. Inventory shows `HomeController` with API route `Home/Index/{id}` and `InventoryService` as a regular class.
 
+### Automated check
+
+[`scripts/check-extraction.mongo.js`](scripts/check-extraction.mongo.js) is a self-contained `mongosh` script that probes the customer's primary database and reports a pass/fail verdict. Connect to the customer's Mongo, then:
+
+```bash
+mongosh "<connection-string>" --file scripts/check-extraction.mongo.js
+```
+
+Or paste the file contents into an open `mongosh` session. Edit `REPO_NAME` at the top if you renamed the repo. The script reports on: repository onboarding, profile presence, commits indexed, inventory by `EntityType`, specific entity probes (`HomeController`, action methods, the control item), and a final verdict that calls out the LIM-40151 signature explicitly (control item present but no APIs).
+
 ## Related links
 
 - Production fix PR: [apiiro/lim#43663](https://github.com/apiiro/lim/pull/43663)
